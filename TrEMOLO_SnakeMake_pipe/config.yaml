@@ -1,0 +1,14 @@
+SAMPLES:
+    - sample.fasta
+
+refFasta:
+    - reference_genome.fasta
+     
+altdir:
+    - /other/directory/
+
+TEdatabase:
+    - specieslib_db
+
+TEfastaIndex:
+    - specieslib_db.fai

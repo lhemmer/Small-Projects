@@ -1,0 +1,191 @@
+###################################################################################################################################
+
+## load configuration for variables
+
+configfile: "config.yaml"
+
+## set up variables from configuration file
+
+altdir = config["altdir"]
+refFasta = config["refFasta"]
+TEdatabase = config["TEdatabase"]
+
+## import Python modules
+
+#from Bio import SeqIO
+
+from csv import DictReader
+
+## other variables
+
+minimalSize = [90]
+
+## setting up dictionary of TEs, right now it just works best to fall back on the BLAST TE database
+
+#database = config["TEdatabase"]
+#seqDict = SeqIO.to_dict(SeqIO.parse(TEdatabase, "fasta"))
+
+## reduce redundancy 
+
+outLabels = ["insertions", "deletions"]
+
+###################################################################################################################################
+
+## establish output files
+
+rule all:
+    input:
+    	expand('{sample}_insertion.bed', sample=config["SAMPLES"]),
+    	expand('{sample}_deletion.bed', sample=config["SAMPLES"]),
+    	expand('{sample}_insertion_converted.bed', sample=config["SAMPLES"]),
+    	expand('{sample}_insertion.fasta', sample=config["SAMPLES"]),
+    	expand('{sample}_deletion.fasta', sample=config["SAMPLES"]),
+    	expand('{sample}_insertions_vsTEdb.bln', sample=config["SAMPLES"]),
+    	expand('{sample}_deletions_vsTEdb.bln', sample=config["SAMPLES"]),
+    	expand('{sample}_te.sizes', sample=config["SAMPLES"]),
+    	#expand('{sample}_{outLabel}_TE.csv', sample=config["SAMPLES"], outLabel=outLabels),
+    	expand('{sample}_insertions_TE.csv', sample=config["SAMPLES"]),
+    	#expand('{sample}_deleted_TE.csv', sample=config["SAMPLES"]),
+	
+        
+        
+###################################################################################################################################
+
+
+rule indel_extraction:
+	input:
+		assembleBed = '{sample}_structural_variants.bed'
+	output:
+		insBed = '{sample}_insertion.bed',
+		delBed = '{sample}_deletion.bed'
+	shell:
+		'cat {input.assembleBed} | grep Deletion > {output.delBed} && cat {input.assembleBed} | grep Insertion > {output.insBed}'
+
+
+rule bed_converter:
+	input:
+		'{sample}_insertion.bed'
+	output:
+		'{sample}_insertion_converted.bed'
+	run:
+		outputHandle = open(output[0], "w")
+		with open(input[0], "r") as inputHandle:
+			for line in inputHandle:
+				if line.startswith("reference"): # header check
+					continue
+				mainLine = line.strip()
+				fields = mainLine.split("\t")
+				#Convert from CHR:START-STOP:STRAND to CHR START STOP STRAND
+				altInfo = fields[9].replace(':','\t')
+				altInfo = altInfo.replace('-','\t')
+				outputHandle.write(altInfo)
+				outputHandle.write("\n")
+
+
+rule fasta_extraction:
+	input:
+		insBed = '{sample}_insertion_converted.bed',
+		delBed = '{sample}_deletion.bed',
+		refGenome = expand('{refFasta}', refFasta=refFasta),
+		altGenome = '{sample}.fa'
+	output:
+		insFasta = '{sample}_insertion.fasta',
+		delFasta = '{sample}_deletion.fasta'
+	run:
+		shell('bedtools getfasta -fi {input.altGenome} -bed {input.insBed} -name > {output.insFasta}'),
+		shell('bedtools getfasta -fi {input.refGenome} -bed {input.delBed} -name > {output.delFasta}')
+
+
+rule blast_on_ref:
+	input:
+		teDB = expand('{TEdatabase}', TEdatabase=TEdatabase),
+		insFasta = '{sample}_insertion.fasta',
+		delFasta = '{sample}_deletion.fasta'
+	output:
+		insBlast = '{sample}_insertions_vsTEdb.bln',
+		delBlast = '{sample}_deletions_vsTEdb.bln'
+	run:
+		shell('blastn -db {input.teDB} -query {input.insFasta} -outfmt 6 -out {output.insBlast}'),
+		shell('blastn -db {input.teDB} -query {input.delFasta} -outfmt 6 -out {output.delBlast}')
+
+
+rule fasta_lengths:
+	input:
+		expand('{TEfastaIndex}', TEfastaIndex=config["TEfastaIndex"])
+	output:
+		'{sample}_te.sizes'
+	run:
+		shell('cut -f 1,2 {input} > {output}')
+
+
+rule te_identification_blast_ins:
+	input:
+		insBlast = '{sample}_insertions_vsTEdb.bln',
+		teSizes = '{sample}_te.sizes'
+	output:
+		'{sample}_insertions_TE.csv'
+	params: 
+		minSize = minimalSize
+	run:
+		seqDict = {}
+		with open(input.teSizes, "r") as tsvFile:
+			for line in tsvFile:
+				line = line.strip()
+				fields = line.split("\t")
+				seqDict[fields[0]] = int(fields[1])
+
+		outputHandle = open(output[0], "w")
+		with open(input.insBlast, "r") as inputHandle:
+			for line in inputHandle:
+				line = line.strip()
+				fields = line.split("\t")
+				if int(fields[3]) < ((1/100) * seqDict[fields[1]]):
+					continue
+				else:
+					outLine = fields[1] + "\t" + fields[0] + "\t" + fields[2] + "\t" + fields[3] + "\t" + str(seqDict[fields[1]]) + "\t" + str((int(fields[3])/seqDict[fields[1]])*100) + "\n"
+					outputHandle.write(outLine)
+
+
+
+###################################################################################################################################
+
+#### for fixing later, to look at TE deletions between the reference and the sample
+
+#rule te_identification_blast_dels:
+#	input:
+#		#expand('{sample}_{outLabel}_vsTEdb.bln', sample=config["SAMPLES"], outLabel=outLabels)
+#		'{sample}_deletions_vsTEdb.bln'
+#	output:
+#		#expand('{sample}_{outLabel}_TE.csv', sample=config["SAMPLES"], outLabel=outLabels)
+#		'{sample}_deleted_TE.csv'
+	#params: 
+	#	minSize = minimalSize
+#	run:
+#		outputHandle = open(output[0], "w")
+#		with open(input[0], "r") as inputHandle:
+#			for line in inputHandle:
+#				line = line.strip()
+#				fields = line.split("\t")
+#				#if int(fields[3]) < ((minimalSize/100) * len(seqDict[fields[1]])):
+#				if int(fields[3]) < ((90/100) * len(seqDict[fields[1]])):
+#					continue
+#				else:
+#					outLine = fields[1] + "\t" + fields[0] + "\t" + fields[2] + "\t" + fields[3] + "\t" + str(len(seqDict[fields[1]])) + "\t" + str((int(fields[3])/len(seqDict[fields[1]]))*100) + "\n"
+#					outputHandle.write(outLine)
+
+			
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
